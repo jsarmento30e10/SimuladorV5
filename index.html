@@ -219,6 +219,8 @@
       <input id="in-nome" placeholder="Camiseta Azul M">
       <label class="campo">Categoria</label>
       <select id="in-cat"><option>Alimentos</option><option>Roupas</option><option>Eletrônicos</option><option>Calçados</option><option selected>GM</option></select>
+      <label class="campo">Embalagem / Flyer deste SKU</label>
+      <select id="in-prod-flyer"></select>
       <label class="campo">Foto do produto (opcional)</label>
       <input type="file" id="in-foto" accept="image/*" onchange="fotoSelecionada(event)">
       <div id="foto-preview"></div>
@@ -357,10 +359,6 @@
     <h2 class="secao"><span class="num">4</span> Outbound · Packing</h2>
     <p class="dica">Bipe a tote vinda da coleta. Para cada produto, bipe o produto e depois o <b>Flyer</b> indicado.</p>
     <div id="pack-conteudo"></div>
-    <div class="card" style="margin-top:14px">
-      <h3>✅ Pedidos empacotados (<span id="qtd-pack">0</span>)</h3>
-      <div id="lista-pack"></div>
-    </div>
   </section>
 
   <!-- ============ ESTOQUE ============ -->
@@ -458,6 +456,13 @@
 #modal-prob h2{margin:6px 0 4px;font-size:19px;color:#2D3277;}
 #modal-prob p{color:#444;font-size:14px;margin:0 0 6px;}</style>
 <div class="modal" id="modal-prob"><div class="cx"></div></div>
+
+<style>#modal-prodedit{position:fixed;inset:0;background:rgba(0,0,0,.55);z-index:130;display:none;align-items:center;justify-content:center;padding:20px;}
+#modal-prodedit.on{display:flex;}
+#modal-prodedit .cx{background:#fff;border-radius:18px;max-width:420px;width:100%;padding:22px;}
+#modal-prodedit h2{margin:0 0 4px;font-size:19px;color:#2D3277;}
+#modal-prodedit p{color:#777;font-size:13px;margin:0 0 12px;}</style>
+<div class="modal" id="modal-prodedit"><div class="cx"></div></div>
 
 <div class="modal" id="modal-scan">
   <div class="mtopo">
@@ -4351,10 +4356,19 @@ function renderConfig() {
     <button class="del" onclick="delBin('${b.code}')">×</button></div>`).join('') :
         `<div class="vazio"><span class="em">🗄️</span>Nenhum bin ainda</div>`;
 
+    // select de embalagem no formulário de produto
+    const selF = document.getElementById('in-prod-flyer');
+    if (selF) {
+        const cur = selF.value;
+        selF.innerHTML = '<option value="">— sem embalagem —</option>' + S.flyers.map(f => `<option value="${f.code}">${f.code}</option>`).join('');
+        if (cur) selF.value = cur;
+    }
+
     const lp = document.getElementById('lista-prod');
     lp.innerHTML = S.products.length ? S.products.map(p => `
     <div class="item">${imgProd(p.sku,36)}
-    <div class="txt"><b>${p.name}</b><span>${p.sku} · ${p.cat||'GM'}</span></div>
+    <div class="txt"><b>${p.name}</b><span>${p.sku} · ${p.cat||'GM'} · ${p.flyer?('✉️ '+p.flyer):'<span style="color:var(--laranja)">sem embalagem</span>'}</span></div>
+    <button class="btn cinza peq" style="flex:0 0 auto;margin-right:6px" onclick="abrirEditProduto('${p.sku}')">✏️</button>
     <button class="del" onclick="delProd('${p.sku}')">×</button></div>`).join('') :
         `<div class="vazio"><span class="em">🏷️</span>Nenhum produto ainda</div>`;
 
@@ -4502,10 +4516,13 @@ function addProduto() {
         name,
         cat
     };
+    const flyEl = document.getElementById('in-prod-flyer');
+    if (flyEl && flyEl.value) prod.flyer = flyEl.value;
     if (_fotoPendente) prod.img = _fotoPendente;
     S.products.push(prod);
     es.value = '';
     en.value = '';
+    if (flyEl) flyEl.value = '';
     _fotoPendente = null;
     const fi = document.getElementById('in-foto');
     if (fi) fi.value = '';
@@ -4520,6 +4537,51 @@ function delProd(sku) {
     S.products = S.products.filter(p => p.sku !== sku);
     salvar();
     renderConfig();
+}
+
+function abrirEditProduto(sku) {
+    const p = getProd(sku);
+    if (!p) return;
+    const cats = ["Alimentos", "Roupas", "Eletrônicos", "Calçados", "GM"];
+    const optCat = cats.map(c => `<option ${c === (p.cat || 'GM') ? 'selected' : ''}>${c}</option>`).join('');
+    const optFly = ['<option value="">— sem embalagem —</option>'].concat(
+        S.flyers.map(f => `<option value="${f.code}" ${f.code === p.flyer ? 'selected' : ''}>${f.code}</option>`)).join('');
+    const nomeSeguro = (p.name || '').replace(/"/g, '&quot;');
+    const m = document.getElementById('modal-prodedit');
+    m.querySelector('.cx').innerHTML = `
+    <h2>✏️ Editar produto</h2>
+    <p>${p.sku}</p>
+    <label class="campo">Descrição</label>
+    <input id="ed-nome" value="${nomeSeguro}">
+    <label class="campo">Categoria</label>
+    <select id="ed-cat">${optCat}</select>
+    <label class="campo">Embalagem / Flyer deste SKU</label>
+    <select id="ed-flyer">${optFly}</select>
+    ${S.flyers.length ? '' : '<p class="dica" style="margin-top:6px;color:var(--laranja)">Cadastre flyers na seção "Flyers / embalagens" para vincular.</p>'}
+    <div class="btn-row" style="margin-top:14px">
+      <button class="btn verde" onclick="salvarEditProduto('${p.sku}')">✔ Salvar</button>
+      <button class="btn cinza" onclick="fecharEditProduto()">Cancelar</button>
+    </div>`;
+    m.classList.add('on');
+}
+
+function salvarEditProduto(sku) {
+    const p = getProd(sku);
+    if (!p) return;
+    const n = (document.getElementById('ed-nome').value || '').trim();
+    p.name = n || p.name;
+    p.cat = document.getElementById('ed-cat').value;
+    const fl = document.getElementById('ed-flyer').value;
+    if (fl) p.flyer = fl;
+    else delete p.flyer;
+    fecharEditProduto();
+    salvar();
+    renderConfig();
+    toast("Produto atualizado", "ok");
+}
+
+function fecharEditProduto() {
+    document.getElementById('modal-prodedit').classList.remove('on');
 }
 
 function addTote() {
@@ -4627,20 +4689,21 @@ function carregarExemplo() {
         }
     });
     [
-        ["SKU-001", "Camiseta Azul M", "Roupas"],
-        ["SKU-002", "Tênis Corrida 42", "Calçados"],
-        ["SKU-003", "Fone Bluetooth", "Eletrônicos"],
-        ["SKU-004", "Caneca Térmica", "GM"],
-        ["SKU-005", "Mochila Notebook", "GM"],
-        ["SKU-006", "Carregador USB-C", "Eletrônicos"],
-        ["SKU-007", "Barra de Cereal", "Alimentos"],
-        ["SKU-008", "Mouse Sem Fio", "Eletrônicos"]
+        ["SKU-001", "Camiseta Azul M", "Roupas", "B2"],
+        ["SKU-002", "Tênis Corrida 42", "Calçados", "B4"],
+        ["SKU-003", "Fone Bluetooth", "Eletrônicos", "B1"],
+        ["SKU-004", "Caneca Térmica", "GM", "B3"],
+        ["SKU-005", "Mochila Notebook", "GM", "B5"],
+        ["SKU-006", "Carregador USB-C", "Eletrônicos", "B1"],
+        ["SKU-007", "Barra de Cereal", "Alimentos", "B1"],
+        ["SKU-008", "Mouse Sem Fio", "Eletrônicos", "B2"]
     ]
-    .forEach(([s, n, cat]) => {
+    .forEach(([s, n, cat, flyer]) => {
         if (!getProd(s)) S.products.push({
             sku: s,
             name: n,
-            cat
+            cat,
+            flyer
         });
     });
     ["T-001", "T-002", "T-003", "T-004", "T-005", "T-006", "T-007", "T-008", "T-009", "T-010", "T-011", "T-012"].forEach(c => {
@@ -4884,8 +4947,9 @@ function renderDashboard() {
     const semDados = nets.every(n => n.net === 0);
     area.innerHTML = `<div class="dica" style="margin:0 0 8px">🕒 Atualizado às ${agora}</div>
     <div class="card" style="text-align:center">
+      <div style="font-size:18px;font-weight:800;color:var(--texto);margin-bottom:2px">GNP</div>
       <div style="font-size:13px;color:var(--texto-fraco)">CAD · empacotados ÷ horas totais</div>
-      <div class="destaque-num" style="color:var(--verde)">${cad}</div>
+      <div class="destaque-num" style="color:var(--texto)">${cad}</div>
       <div style="font-size:12px;color:var(--texto-fraco)">${empac} empacotados · ${Math.round(horas*100)/100} h totais</div>
     </div>
     <div class="card"><h3>NET por processo (un/h) — indicador principal</h3>${semDados?'<div class="vazio"><span class="em">📊</span>Sem dados. Finalize processos para ver os gráficos.</div>':barras}</div>` +
@@ -4921,9 +4985,12 @@ function dashOcupacao() {
         'Calçados': '#FF7733',
         'GM': '#FFB300'
     };
-    const catBars = cats.length ? cats.map(c => `<div style="margin-bottom:10px">
-    <div style="display:flex;justify-content:space-between;font-size:13px;font-weight:700"><span>${desenhoCat(c)[0]} ${c}</span><span>${catUn[c]} un</span></div>
-    <div style="background:var(--cinza-borda);border-radius:6px;height:16px;overflow:hidden"><div style="width:${Math.round(catUn[c]/maxCat*100)}%;height:100%;background:${corCat[c]||'#FFB300'}"></div></div></div>`).join('') : '<div class="vazio"><span class="em">📦</span>Sem estoque</div>';
+    const catBars = cats.length ? cats.map(c => {
+        const pctCat = totUn ? Math.round(catUn[c] / totUn * 100) : 0;
+        return `<div style="margin-bottom:10px">
+    <div style="display:flex;justify-content:space-between;font-size:13px;font-weight:700"><span>${desenhoCat(c)[0]} ${c}</span><span>${pctCat}%</span></div>
+    <div style="background:var(--cinza-borda);border-radius:6px;height:16px;overflow:hidden"><div style="width:${pctCat}%;height:100%;background:${corCat[c]||'#FFB300'}"></div></div></div>`;
+    }).join('') : '<div class="vazio"><span class="em">📦</span>Sem estoque</div>';
     // lotação por BIN (apenas com estoque)
     const binsCom = S.bins.map(b => {
         const inv = S.inventory[b.code] || {};
@@ -4940,12 +5007,12 @@ function dashOcupacao() {
         const lotado = b.un >= CAP_UN || b.skus >= CAP_SKU;
         const cor = lotado ? 'var(--vermelho)' : (pct >= 70 || b.skus >= 5 ? 'var(--laranja)' : 'var(--verde)');
         return `<div style="margin-bottom:9px">
-      <div style="display:flex;justify-content:space-between;font-size:12px;font-weight:700"><span>${b.code}</span><span>${b.un}/15 un · ${b.skus}/7 SKU${lotado?' ⛔':''}</span></div>
+      <div style="display:flex;justify-content:space-between;font-size:12px;font-weight:700"><span>${b.code}</span><span>${pct}%${lotado?' ⛔':''}</span></div>
       <div style="background:var(--cinza-borda);border-radius:6px;height:14px;overflow:hidden"><div style="width:${pct}%;height:100%;background:${cor}"></div></div></div>`;
     }).join('') : '<div class="vazio"><span class="em">🗄️</span>Nenhum BIN com estoque</div>';
     return `<div class="card" style="text-align:center">
       <div style="font-size:13px;color:var(--texto-fraco)">Ocupação do estoque</div>
-      <div class="destaque-num" style="color:${corOcup}">${ocup}%</div>
+      <div class="destaque-num" style="color:var(--texto)">${ocup}%</div>
       <div style="font-size:12px;color:var(--texto-fraco)">${totUn} un de ${capTot} (capacidade · ${S.bins.length} bins × 15)</div>
       <div style="background:var(--cinza-borda);border-radius:6px;height:16px;overflow:hidden;margin-top:8px"><div style="width:${ocup}%;height:100%;background:${corOcup}"></div></div>
     </div>
@@ -5986,7 +6053,8 @@ function packingBiparProduto() {
             return;
         }
         pk.alvoSku = ln.sku;
-        pk.flyer = embalagemAleatoria();
+        const prodPk = getProd(ln.sku);
+        pk.flyer = (prodPk && prodPk.flyer) ? prodPk.flyer : embalagemAleatoria();
         pk.fase = 'flyer';
         salvar();
         renderPacking();
@@ -6122,14 +6190,6 @@ function renderPacking() {
         }
         c.innerHTML = h;
     }
-    const pkd = S.orders.filter(o => o.status === 'empacotado');
-    document.getElementById('qtd-pack').textContent = pkd.length;
-    const l = document.getElementById('lista-pack');
-    l.innerHTML = pkd.length ? pkd.map(o => `
-    <div class="item"><div class="ic" style="background:#E6F7EF">✅</div>
-    <div class="txt"><b>${o.label} · Totes ${o.toteCat?Object.values(o.toteCat).join('/'):o.tote}</b><span>${o.lines.reduce((t,x)=>t+x.qty,0)} itens</span></div>
-    <span class="tag empacotado">Fechado</span></div>`).join('') :
-        `<div class="vazio"><span class="em">📦</span>Nenhum pedido empacotado ainda</div>`;
 }
 
 /* ========= ESTOQUE ========= */
