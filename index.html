@@ -162,8 +162,6 @@
   }
   @media (min-width:520px){ .print-grid{grid-template-columns:repeat(3,1fr);} }
 </style>
-<script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-app-compat.js"></script>
-<script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-database-compat.js"></script>
 </head>
 <body>
 
@@ -391,6 +389,24 @@
       <div id="prod-area"></div>
     </div>
     <div class="card">
+      <h3>📍 BIN sugerido × bipado (Putaway)</h3>
+      <p class="dica" style="margin-bottom:8px">Colaboradores que não usaram um BIN sugerido no Putaway.</p>
+      <div class="btn-row" style="margin-bottom:8px">
+        <button class="btn escuro peq" style="flex:1" onclick="renderDesviosBin()">↻ Atualizar</button>
+        <button class="btn cinza peq" style="flex:1" onclick="exportarDesviosCSV()">⬇ CSV</button>
+      </div>
+      <div id="desvios-area"></div>
+    </div>
+    <div class="card">
+      <h3>📦 Totes em utilização</h3>
+      <p class="dica" style="margin-bottom:8px">Totes ocupadas agora e em qual processo estão paradas.</p>
+      <div class="btn-row" style="margin-bottom:8px">
+        <button class="btn escuro peq" style="flex:1" onclick="renderTotesUso()">↻ Atualizar</button>
+        <button class="btn cinza peq" style="flex:1" onclick="exportarTotesUsoCSV()">⬇ CSV</button>
+      </div>
+      <div id="totesuso-area"></div>
+    </div>
+    <div class="card">
       <h3>🚩 Problemas operativos (Picking)</h3>
       <p class="dica" style="margin-bottom:8px">Etiqueta e produto não localizado reportados na coleta.</p>
       <div class="btn-row" style="margin-bottom:8px">
@@ -427,6 +443,7 @@
 #modal-cad p{color:#555;font-size:13px;margin:0 0 14px;}</style>
 <div class="modal" id="modal-cad">
   <div class="cx">
+    <div style="font-weight:800;color:#2D3277;font-size:16px;letter-spacing:.3px;margin-bottom:8px">Simulador de Operações Full</div>
     <div style="font-size:40px">🏢</div>
     <h2>Selecione o CAD / Filial</h2>
     <p>Escolha a unidade onde você está treinando. Os dados são compartilhados por CAD.</p>
@@ -3352,13 +3369,8 @@ var __Html5QrcodeLibrary__;(()=>{var t={449:function(t,e,r){!function(t){"use st
     /* ---- Firebase (nuvem em tempo real) ----
        Cole aqui a configuração do SEU projeto Firebase (veja o GUIA-SETUP-NUVEM).
        Enquanto os campos estiverem vazios, o app roda em "modo local". */
-    const FIREBASE_CONFIG = {
-        apiKey: "",
-        authDomain: "",
-        databaseURL: "",
-        projectId: "",
-        appId: ""
-    };
+    /* Backend: Google Apps Script (via google.script.run) quando a tela é servida
+       pelo próprio Apps Script. No GitHub pessoal roda em modo local (sem vincular). */
 
     const CADS_BASE = ["SP25", "SP26", "SP31", "SP33"];
     let cadsExtra = [];   // CADs cadastrados (via nuvem/local)
@@ -3374,13 +3386,13 @@ var __Html5QrcodeLibrary__;(()=>{var t={449:function(t,e,r){!function(t){"use st
 
     /* chaves do mundo compartilhado (o que é sincronizado) */
     const SHARED_KEYS = ["bins", "products", "toteList", "flyers", "benches",
-        "printers", "inventory", "inboundTotes", "orders", "totes", "logs", "produtividade"
+        "printers", "inventory", "inboundTotes", "orders", "totes", "logs", "produtividade", "putawayDesvios"
     ];
     const LISTA_CHAVE = {
         bins: "code", products: "sku", toteList: "code", flyers: "code",
         benches: "code", printers: "code", inboundTotes: "tote", orders: "id"
     };
-    const LISTAS_APPEND = ["logs", "produtividade", "problemas"];
+    const LISTAS_APPEND = ["logs", "produtividade", "problemas", "putawayDesvios"];
 
     const KEY_L = "meli_wms_sim_L";
     const keyS = cad => "meli_wms_sim_S_" + cad;
@@ -3390,7 +3402,7 @@ var __Html5QrcodeLibrary__;(()=>{var t={449:function(t,e,r){!function(t){"use st
         return {
             bins: [], products: [], toteList: [], flyers: [], benches: [],
             printers: [], inventory: {}, inboundTotes: [], orders: [], totes: {},
-            logs: [], produtividade: [], problemas: []
+            logs: [], produtividade: [], problemas: [], putawayDesvios: []
         };
     }
 
@@ -3441,27 +3453,35 @@ var __Html5QrcodeLibrary__;(()=>{var t={449:function(t,e,r){!function(t){"use st
     /* ===================================================================
        SINCRONIZAÇÃO NA NUVEM (diff -> ops -> outbox -> Apps Script)
        =================================================================== */
-    let fbDB = null, fbReady = false, fbRefCad = null;
+    let versaoServidor = 0, enviando = false, outbox = [];
 
-    function temNuvem() { return !!(fbReady && L.cad); }
+    function temAppsScript() { return (typeof google !== "undefined" && google.script && google.script.run); }
+    function temNuvem() { return !!(temAppsScript() && L.cad); }
 
-    function initFirebase() {
+    /* wrapper Promise para google.script.run */
+    function gsCall(fn) {
+        const args = Array.prototype.slice.call(arguments, 1);
+        return new Promise(function (resolve, reject) {
+            const runner = google.script.run.withSuccessHandler(resolve).withFailureHandler(reject);
+            runner[fn].apply(runner, args);
+        });
+    }
+
+    function initBackend() {
+        if (temAppsScript()) { carregarCads(); }
+        else { setSyncStatus("local"); }
+    }
+
+    async function carregarCads() {
+        if (!temAppsScript()) return;
         try {
-            if (!FIREBASE_CONFIG || !FIREBASE_CONFIG.databaseURL || typeof firebase === "undefined") { fbReady = false; return; }
-            if (!firebase.apps || !firebase.apps.length) firebase.initializeApp(FIREBASE_CONFIG);
-            fbDB = firebase.database();
-            fbReady = true;
-            fbDB.ref("cadsList").on("value", function (snp) {
-                const v = snp.val() || {};
-                cadsExtra = Object.keys(v).map(function (k) { return decKey(k); });
+            const r = await gsCall("lerCadsWeb");
+            if (r && r.cads) {
+                cadsExtra = r.cads;
                 var mc = document.getElementById("modal-cad");
                 if (mc && mc.classList.contains("on")) abrirModalCad(document.getElementById("cad-fechar").style.display === "block");
-            });
-            fbDB.ref(".info/connected").on("value", function (snp) {
-                if (!L.cad) { setSyncStatus("local"); return; }
-                setSyncStatus(snp.val() ? "ok" : "off");
-            });
-        } catch (e) { fbReady = false; setSyncStatus("off"); }
+            }
+        } catch (e) {}
     }
 
     function setSyncStatus(estado, txt) {
@@ -3523,60 +3543,46 @@ var __Html5QrcodeLibrary__;(()=>{var t={449:function(t,e,r){!function(t){"use st
         if (!temNuvem()) { setSyncStatus("local"); return; }
         const ops = diffParaOps(baseline, S);
         if (!ops.length) return;
+        outbox.push.apply(outbox, ops);
         baseline = clonar(S);
-        enviarOpsFirebase(ops);
+        cloudFlush();
     }
 
-    /* aplica cada op como escrita no Firebase (invAdd = transação atômica p/ estoque) */
-    function enviarOpsFirebase(ops) {
-        if (!fbRefCad) return;
+    async function cloudFlush() {
+        if (enviando || !temNuvem() || !outbox.length) return;
+        enviando = true;
+        setSyncStatus("enviando");
+        const lote = outbox.slice();
         try {
-            ops.forEach(function (op) {
-                if (op.t === "invAdd") {
-                    fbRefCad.child("inventory/" + encKey(op.bin) + "/" + encKey(op.sku))
-                        .transaction(function (cur) { var v = (cur || 0) + op.d; return v > 0 ? v : null; });
-                } else if (op.t === "invDelBin") {
-                    fbRefCad.child("inventory/" + encKey(op.bin)).remove();
-                } else if (op.t === "upsert") {
-                    fbRefCad.child(op.list + "/" + encKey(op.key)).set(op.item);
-                } else if (op.t === "del") {
-                    fbRefCad.child(op.list + "/" + encKey(op.val)).remove();
-                } else if (op.t === "push") {
-                    fbRefCad.child(op.list).push(op.item);
-                } else if (op.t === "toteSet") {
-                    fbRefCad.child("totes/" + encKey(op.code)).set(op.val);
-                } else if (op.t === "toteDel") {
-                    fbRefCad.child("totes/" + encKey(op.code)).remove();
+            const r = await gsCall("aplicarOpsWeb", L.cad, JSON.stringify(lote));
+            if (r && r.ok) {
+                outbox.splice(0, lote.length);
+                if (r.versao) versaoServidor = r.versao;
+                setSyncStatus(outbox.length ? "enviando" : "ok");
+                if (outbox.length) cloudFlush();
+            } else { setSyncStatus("off"); }
+        } catch (e) {
+            setSyncStatus("off");
+        } finally {
+            enviando = false;
+        }
+    }
+
+    async function cloudPoll() {
+        if (!temNuvem() || outbox.length || enviando) return;
+        try {
+            const r = await gsCall("lerEstadoWeb", L.cad, versaoServidor);
+            if (r && r.ok) {
+                if (r.versao && r.versao !== versaoServidor && r.estado) {
+                    versaoServidor = r.versao;
+                    S = Object.assign(estadoInicial(), JSON.parse(r.estado));
+                    baseline = clonar(S);
+                    salvarCacheS();
+                    rerenderAtual();
                 }
-            });
+                setSyncStatus(outbox.length ? "enviando" : "ok");
+            }
         } catch (e) { setSyncStatus("off"); }
-    }
-
-    /* chaves seguras p/ Firebase (que proíbe . # $ [ ] /) */
-    function encKey(k) {
-        return String(k).replace(/%/g, "%25").replace(/\./g, "%2E").replace(/#/g, "%23")
-            .replace(/\$/g, "%24").replace(/\[/g, "%5B").replace(/\]/g, "%5D").replace(/\//g, "%2F");
-    }
-    function decKey(k) { try { return decodeURIComponent(k); } catch (e) { return k; } }
-
-    /* reconstrói S (arrays) a partir do snapshot do Firebase (maps) */
-    function snapshotParaS(v) {
-        v = v || {};
-        const S2 = estadoInicial();
-        ["bins", "products", "toteList", "flyers", "benches", "printers", "inboundTotes", "orders"].forEach(function (list) {
-            S2[list] = v[list] ? Object.keys(v[list]).map(function (k) { return v[list][k]; }) : [];
-        });
-        ["logs", "produtividade", "problemas"].forEach(function (list) {
-            S2[list] = v[list] ? Object.keys(v[list]).sort().map(function (k) { return v[list][k]; }) : [];
-        });
-        S2.inventory = {};
-        if (v.inventory) Object.keys(v.inventory).forEach(function (b) {
-            const bin = decKey(b); S2.inventory[bin] = {};
-            Object.keys(v.inventory[b]).forEach(function (sk) { S2.inventory[bin][decKey(sk)] = v.inventory[b][sk]; });
-        });
-        S2.totes = {};
-        if (v.totes) Object.keys(v.totes).forEach(function (c) { S2.totes[decKey(c)] = v.totes[c]; });
-        return S2;
     }
 
     /* nome da tela atual + re-render (inclui a tela de execução do picking) */
@@ -3598,20 +3604,9 @@ var __Html5QrcodeLibrary__;(()=>{var t={449:function(t,e,r){!function(t){"use st
         baseline = clonar(S);
         atualizarHeaderCad();
         irPara('config');
-        if (fbRefCad) { try { fbRefCad.off(); } catch (e) {} fbRefCad = null; }
-        if (temNuvem()) {
-            setSyncStatus("enviando");
-            fbRefCad = fbDB.ref("cads/" + L.cad);
-            fbRefCad.on("value", function (snap) {
-                S = snapshotParaS(snap.val());
-                baseline = clonar(S);
-                salvarCacheS();
-                rerenderAtual();
-                setSyncStatus("ok");
-            }, function () { setSyncStatus("off"); });
-        } else {
-            setSyncStatus("local");
-        }
+        outbox = []; versaoServidor = 0;
+        if (temNuvem()) { setSyncStatus("enviando"); cloudPoll(); }
+        else { setSyncStatus("local"); }
     }
 
     /* ===================================================================
@@ -3662,7 +3657,7 @@ var __Html5QrcodeLibrary__;(()=>{var t={449:function(t,e,r){!function(t){"use st
         L.customCads = L.customCads || [];
         L.customCads.push(code);
         salvarLocal();
-        if (fbReady && fbDB) { try { fbDB.ref("cadsList/" + encKey(code)).set(true); } catch (e) {} }
+        if (temAppsScript()) { gsCall("addCadWeb", code).then(function (r) { if (r && r.cads) cadsExtra = r.cads; }).catch(function () {}); }
         el.value = "";
         toast("CAD " + code + " cadastrado", "ok");
         renderConfig();
@@ -3671,7 +3666,7 @@ var __Html5QrcodeLibrary__;(()=>{var t={449:function(t,e,r){!function(t){"use st
     function delCad(code) {
         L.customCads = (L.customCads || []).filter(function (c) { return c !== code; });
         salvarLocal();
-        if (fbReady && fbDB) { try { fbDB.ref("cadsList/" + encKey(code)).remove(); } catch (e) {} }
+        if (temAppsScript()) { gsCall("removeCadWeb", code).then(function (r) { if (r && r.cads) cadsExtra = r.cads; }).catch(function () {}); }
         renderConfig();
         toast("CAD " + code + " removido da lista", "info");
     }
@@ -3711,6 +3706,25 @@ const getTote = code => S.toteList.find(t => t.code === code);
 const getFlyer = code => S.flyers.find(f => f.code === code);
 const getBench = code => S.benches.find(x => x.code === code);
 const getPrinter = code => S.printers.find(x => x.code === code);
+
+/* hora atual HH:MM:SS */
+function horaAgora() { return new Date().toTimeString().slice(0, 8); }
+function fmtHora(ts) { return ts ? new Date(ts).toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' }) : '—'; }
+
+/* ===== Totes em utilizacao (mapa compartilhado S.totes) ===== */
+function toteEmUso(code, proc, extra) {
+    if (!code) return;
+    S.totes = S.totes || {};
+    const atual = S.totes[code] || {};
+    S.totes[code] = Object.assign({}, atual, {
+        proc: proc,
+        desde: (atual.proc === proc && atual.desde) ? atual.desde : Date.now(),
+        cad: L.cad
+    }, extra || {});
+}
+function toteLiberar(code) {
+    if (code && S.totes) delete S.totes[code];
+}
 
 function binsComSku(sku) {
     return S.bins.filter(b => (S.inventory[b.code] || {})[sku] > 0).map(b => ({
@@ -3983,6 +3997,9 @@ function finalizarOperador(proc, auto) {
         qtd,
         seg,
         net,
+        inicio: op.inicio,
+        fim: fim,
+        status: auto ? 'Finalizado forçado' : 'Finalizado',
         encerramento: auto ? 'inatividade (1h sem bipar)' : 'manual'
     });
     logEvento(nomeProc, op.nome, (auto ? 'encerrado por inatividade' : 'finalizado') + ' · ' + qtd + ' un · ' + seg + 's');
@@ -4763,28 +4780,46 @@ function renderProdutividade() {
     const area = document.getElementById('prod-area');
     if (!area) return;
     const agora = new Date().toLocaleTimeString('pt-BR');
-    if (!S.produtividade || !S.produtividade.length) {
+    const temAtivo = !!(L.putawayOp || L.pickingOp || L.packingOp);
+    if ((!S.produtividade || !S.produtividade.length) && !temAtivo) {
         area.innerHTML = `<div class="dica" style="margin:0 0 8px">🕒 Atualizado às ${agora}</div><div class="vazio"><span class="em">📈</span>Sem registros. Faça Iniciar → Finalizar em um processo.</div>`;
         return;
     }
     let tQ = 0,
         tS = 0;
+    // linhas de operadores atualmente logados (deste aparelho) => "Em andamento"
+    const ativos = [
+        ['Putaway', L.putawayOp],
+        ['Picking', L.pickingOp],
+        ['Packing', L.packingOp]
+    ].filter(function (x) { return x[1]; }).map(function (x) {
+        const proc = x[0], op = x[1];
+        const seg = Math.max(1, Math.round((Date.now() - op.inicio) / 1000));
+        const q = op.qtd || 0;
+        const net = Math.round((q / (seg / 3600)) * 100) / 100;
+        const ref = (op.refs && op.refs.length) ? op.refs.join(', ') : '-';
+        return `<tr style="background:#FFF8E1"><td>${new Date().toISOString().slice(0,10)}</td><td>${op.nome}</td><td>${proc}</td><td>${ref}</td><td class="qtd">${q}</td><td>${fmtHora(op.inicio)}</td><td>—</td><td>${fmtTempo(seg)}</td><td><span class="tag aberto">Em andamento</span></td><td class="qtd">${net}</td></tr>`;
+    }).join('');
     const rows = S.produtividade.slice().reverse().map(r => {
         const net = r.seg > 0 ? Math.round((r.qtd / (r.seg / 3600)) * 100) / 100 : 0;
         tQ += r.qtd;
         tS += r.seg;
-        return `<tr><td>${r.data}</td><td>${r.nome}</td><td>${r.processo}</td><td>${r.ref}</td><td class="qtd">${r.qtd}</td><td>${fmtTempo(r.seg)}</td><td class="qtd">${net}</td></tr>`;
+        const status = r.status || (r.encerramento && r.encerramento.indexOf('inatividade') >= 0 ? 'Finalizado forçado' : 'Finalizado');
+        const tagCor = status === 'Finalizado forçado' ? 'amar' : 'empacotado';
+        return `<tr><td>${r.data}</td><td>${r.nome}</td><td>${r.processo}</td><td>${r.ref}</td><td class="qtd">${r.qtd}</td><td>${fmtHora(r.inicio)}</td><td>${fmtHora(r.fim)}</td><td>${fmtTempo(r.seg)}</td><td><span class="tag ${tagCor}">${status}</span></td><td class="qtd">${net}</td></tr>`;
     }).join('');
     const netG = tS > 0 ? Math.round((tQ / (tS / 3600)) * 100) / 100 : 0;
     area.innerHTML = `<div class="dica" style="margin:0 0 8px">🕒 Atualizado às ${agora}</div>
     <div class="card" style="padding:0;overflow:auto"><table class="estoque">
-    <thead><tr><th>Data</th><th>Nome</th><th>Processo</th><th>Nº Tote/Onda</th><th>Qtd</th><th>Tempo</th><th>Net (un/h)</th></tr></thead>
-    <tbody>${rows}<tr><td colspan="4"><b>Total geral</b></td><td class="qtd">${tQ}</td><td>${fmtTempo(tS)}</td><td class="qtd">${netG}</td></tr></tbody></table></div>`;
+    <thead><tr><th>Data</th><th>Nome</th><th>Processo</th><th>Nº Tote/Onda</th><th>Qtd</th><th>Início</th><th>Término</th><th>Tempo</th><th>Status</th><th>Net (un/h)</th></tr></thead>
+    <tbody>${ativos}${rows}<tr><td colspan="4"><b>Total geral (finalizados)</b></td><td class="qtd">${tQ}</td><td></td><td></td><td>${fmtTempo(tS)}</td><td></td><td class="qtd">${netG}</td></tr></tbody></table></div>`;
 }
 
 function renderRelatorio() {
     renderMonitoramento();
     renderProdutividade();
+    renderDesviosBin();
+    renderTotesUso();
     renderProblemas();
 }
 
@@ -4934,13 +4969,87 @@ function baixarCSV(nome, linhas) {
 }
 
 function exportarProdutividadeCSV() {
-    const head = ['Data', 'Nome', 'Processo', 'Nº Tote/Onda', 'Qtd', 'Tempo(s)', 'Net(un/h)'];
-    const rows = (S.produtividade || []).map(r => [r.data, r.nome, r.processo, r.ref, r.qtd, r.seg, (r.seg > 0 ? Math.round((r.qtd / (r.seg / 3600)) * 100) / 100 : 0)]);
+    const head = ['Data', 'Nome', 'Processo', 'Nº Tote/Onda', 'Qtd', 'Início', 'Término', 'Tempo(s)', 'Status', 'Net(un/h)'];
+    const rows = [];
+    [['Putaway', L.putawayOp], ['Picking', L.pickingOp], ['Packing', L.packingOp]].filter(function (x) { return x[1]; }).forEach(function (x) {
+        const proc = x[0], op = x[1];
+        const seg = Math.max(1, Math.round((Date.now() - op.inicio) / 1000));
+        const ref = (op.refs && op.refs.length) ? op.refs.join(', ') : '-';
+        rows.push([new Date().toISOString().slice(0, 10), op.nome, proc, ref, op.qtd || 0, fmtHora(op.inicio), '', seg, 'Em andamento', (seg > 0 ? Math.round(((op.qtd || 0) / (seg / 3600)) * 100) / 100 : 0)]);
+    });
+    (S.produtividade || []).forEach(function (r) {
+        const status = r.status || (r.encerramento && r.encerramento.indexOf('inatividade') >= 0 ? 'Finalizado forçado' : 'Finalizado');
+        rows.push([r.data, r.nome, r.processo, r.ref, r.qtd, fmtHora(r.inicio), fmtHora(r.fim), r.seg, status, (r.seg > 0 ? Math.round((r.qtd / (r.seg / 3600)) * 100) / 100 : 0)]);
+    });
     if (!rows.length) {
         toast("Sem dados de produtividade", "err");
         return;
     }
     baixarCSV('produtividade.csv', [head, ...rows]);
+}
+
+/* ===== Relatorio: BIN sugerido x bipado (Putaway) ===== */
+function renderDesviosBin() {
+    const area = document.getElementById('desvios-area');
+    if (!area) return;
+    const agora = new Date().toLocaleTimeString('pt-BR');
+    const lista = (S.putawayDesvios || []);
+    if (!lista.length) {
+        area.innerHTML = `<div class="dica" style="margin:0 0 8px">🕒 Atualizado às ${agora}</div><div class="vazio"><span class="em">📍</span>Nenhum desvio registrado. Todos usaram BINs sugeridos.</div>`;
+        return;
+    }
+    const rows = lista.slice().reverse().map(r => `<tr><td>${r.data||''}</td><td>${r.hora||''}</td><td>${r.nome||''}</td><td>${r.produto||r.sku||''}<br><small style="color:var(--texto-fraco)">${r.sku||''}</small></td><td>${r.sugeridos||''}</td><td><b style="color:var(--vermelho)">${r.bipado||''}</b></td></tr>`).join('');
+    area.innerHTML = `<div class="dica" style="margin:0 0 8px">🕒 Atualizado às ${agora}</div>
+    <div class="card" style="padding:0;overflow:auto"><table class="estoque">
+    <thead><tr><th>Data</th><th>Hora</th><th>Colaborador</th><th>Produto</th><th>BIN sugerido</th><th>BIN bipado</th></tr></thead>
+    <tbody>${rows}</tbody></table></div>`;
+}
+
+function exportarDesviosCSV() {
+    const head = ['Data', 'Hora', 'CAD', 'Colaborador', 'Produto', 'SKU', 'Tote', 'BIN sugerido', 'BIN bipado'];
+    const rows = (S.putawayDesvios || []).map(r => [r.data, r.hora, r.cad, r.nome, r.produto || r.sku, r.sku, r.tote, r.sugeridos, r.bipado]);
+    if (!rows.length) { toast("Sem desvios registrados", "err"); return; }
+    baixarCSV('desvios_bin_putaway.csv', [head, ...rows]);
+}
+
+/* ===== Relatorio: Totes em utilizacao ===== */
+function totesUsoLista() {
+    const m = S.totes || {};
+    return Object.keys(m).map(function (c) {
+        const t = m[c] || {};
+        return { code: c, proc: t.proc || '—', ts: t.desde || 0 };
+    }).sort(function (a, b) { return a.ts - b.ts; });
+}
+
+function renderTotesUso() {
+    const area = document.getElementById('totesuso-area');
+    if (!area) return;
+    const agora = new Date().toLocaleTimeString('pt-BR');
+    const lista = totesUsoLista();
+    if (!lista.length) {
+        area.innerHTML = `<div class="dica" style="margin:0 0 8px">🕒 Atualizado às ${agora}</div><div class="vazio"><span class="em">📦</span>Nenhuma tote em utilização.</div>`;
+        return;
+    }
+    const rows = lista.map(function (r) {
+        const d = r.ts ? new Date(r.ts) : null;
+        const data = d ? d.toISOString().slice(0, 10) : '—';
+        const hora = d ? d.toTimeString().slice(0, 8) : '—';
+        return `<tr><td>${data}</td><td>${hora}</td><td><b>${r.code}</b></td><td>${r.proc}</td></tr>`;
+    }).join('');
+    area.innerHTML = `<div class="dica" style="margin:0 0 8px">🕒 Atualizado às ${agora} · ${lista.length} tote(s) em uso</div>
+    <div class="card" style="padding:0;overflow:auto"><table class="estoque">
+    <thead><tr><th>Data</th><th>Hora</th><th>Tote</th><th>Processo</th></tr></thead>
+    <tbody>${rows}</tbody></table></div>`;
+}
+
+function exportarTotesUsoCSV() {
+    const head = ['Data', 'Hora', 'Tote', 'Processo'];
+    const rows = totesUsoLista().map(function (r) {
+        const d = r.ts ? new Date(r.ts) : null;
+        return [d ? d.toISOString().slice(0, 10) : '', d ? d.toTimeString().slice(0, 8) : '', r.code, r.proc];
+    });
+    if (!rows.length) { toast("Nenhuma tote em uso", "err"); return; }
+    baixarCSV('totes_em_utilizacao.csv', [head, ...rows]);
 }
 
 function exportarMonitoramentoCSV() {
@@ -5171,6 +5280,7 @@ function inboundFinalizarTote() {
         toast("Adicione ao menos 1 produto", "err");
         return;
     }
+    toteEmUso(L.recebendo.tote, 'Inbound (doca)');
     S.inboundTotes.push(L.recebendo);
     L.recebendo = null;
     salvar();
@@ -5189,6 +5299,7 @@ function inboundCancelarTote() {
 function inboundRemoverTote(code) {
     if (confirm("Remover a tote " + code + " da doca?")) {
         S.inboundTotes = S.inboundTotes.filter(x => x.tote !== code);
+        toteLiberar(code);
         salvar();
         renderInbound();
     }
@@ -5302,6 +5413,7 @@ function putawayBiparTote() {
             fase: 'produto'
         };
         S.inboundTotes.splice(idx, 1);
+        toteEmUso(code, 'Putaway', { operador: L.putawayOp ? L.putawayOp.nome : '' });
         if (L.putawayOp) {
             L.putawayOp.refs = L.putawayOp.refs || [];
             if (L.putawayOp.refs.indexOf(code) < 0) L.putawayOp.refs.push(code);
@@ -5381,6 +5493,22 @@ function putawayBiparBin() {
             toast("BIN " + bin.code + " lotado!", "err");
             return;
         }
+        // registra quando o operador NAO usou um dos BINs sugeridos
+        const sugeridos = (pa.sugestoes || []).slice();
+        if (sugeridos.length && sugeridos.indexOf(bin.code) < 0) {
+            S.putawayDesvios = S.putawayDesvios || [];
+            S.putawayDesvios.push({
+                data: new Date().toISOString().slice(0, 10),
+                hora: horaAgora(),
+                cad: L.cad,
+                nome: L.putawayOp ? L.putawayOp.nome : '',
+                sku: sku,
+                produto: (getProd(sku) || {}).name || sku,
+                tote: pa.tote || '',
+                sugeridos: sugeridos.join(', '),
+                bipado: bin.code
+            });
+        }
         const rest = pa.restantes.find(r => r.sku === sku);
         S.inventory[bin.code] = S.inventory[bin.code] || {};
         S.inventory[bin.code][sku] = (S.inventory[bin.code][sku] || 0) + 1;
@@ -5411,6 +5539,7 @@ function putawayFinalizar() {
         return;
     }
     logEvento('Putaway', L.putawayOp ? L.putawayOp.nome : '', 'tote ' + pa.tote + ' finalizada');
+    toteLiberar(pa.tote);
     L.putawayAtivo = null;
     salvar();
     renderArm();
@@ -5760,9 +5889,7 @@ function pickTote() {
                 return;
             }
             o.toteCat[cat] = code;
-            S.totes[code] = {
-                orderId: o.id
-            };
+            toteEmUso(code, 'Picking', { orderId: o.id, cat: cat });
         }
         const toteUsada = o.toteCat[cat];
         o.tote = toteUsada;
@@ -5800,6 +5927,7 @@ function finalizarColeta() {
     const o = S.orders.find(x => x.id === pedidoAtual);
     o.status = 'coletado';
     o.fase = null;
+    (o.toteCat ? Object.values(o.toteCat) : (o.tote ? [o.tote] : [])).forEach(c => toteEmUso(c, 'Packing (aguardando)', { orderId: o.id }));
     salvar();
     toast("Totes " + (o.toteCat ? Object.values(o.toteCat).join(', ') : o.tote) + " prontas para Packing", "ok");
     voltarPicking();
@@ -5825,6 +5953,7 @@ function packingBiparTote() {
         }
         pk.orderId = o.id;
         pk.tote = code;
+        toteEmUso(code, 'Packing', { orderId: o.id });
         pk.fase = 'produto';
         pk.alvoSku = null;
         pk.flyer = null;
@@ -5886,10 +6015,22 @@ function packingConfirmarEmbalado() {
     if (!pk) return;
     const o = S.orders.find(x => x.id === pk.orderId);
     const ln = o.lines[pk.lineIdxs[pk.pos]];
-    ln.packed = true;
+    // cada unidade e embalada individualmente (produtos do mesmo SKU sao de clientes diferentes)
+    ln.packedUnits = (ln.packedUnits || 0) + 1;
     if (L.packingOp) {
-        L.packingOp.qtd = (L.packingOp.qtd || 0) + (ln.qty || 1);
+        L.packingOp.qtd = (L.packingOp.qtd || 0) + 1;
     }
+    // ainda faltam unidades do mesmo produto? bipar e embalar 1 a 1
+    if (ln.packedUnits < (ln.qty || 1)) {
+        pk.alvoSku = null;
+        pk.flyer = null;
+        pk.fase = 'produto';
+        salvar();
+        renderPacking();
+        toast("Unidade embalada · faltam " + ((ln.qty || 1) - ln.packedUnits) + " un deste produto", "ok");
+        return;
+    }
+    ln.packed = true;
     pk.pos++;
     pk.alvoSku = null;
     pk.flyer = null;
@@ -5900,6 +6041,7 @@ function packingConfirmarEmbalado() {
             o.status = 'empacotado';
             logEvento('Packing', pk.operador, 'pedido ' + o.label + ' empacotado');
         }
+        toteLiberar(toteFeita);
         L.packing = {
             operador: pk.operador, fase: 'tote', wt: pk.wt, printer: pk.printer,
             tote: null, orderId: null, idx: 0, lineIdxs: [], pos: 0, alvoSku: null, flyer: null
@@ -5951,14 +6093,17 @@ function renderPacking() {
             const o = S.orders.find(x => x.id === pk.orderId);
             const ln = o.lines[pk.lineIdxs[pk.pos]];
             const p = getProd(ln.sku);
-            const totL = pk.lineIdxs.length;
-            h += `<div class="card"><div style="display:flex;justify-content:space-between;align-items:center"><b>📦 Tote ${pk.tote} · ${o.label}</b><span>${pk.pos}/${totL}</span></div>
-        <div class="barra-prog"><i style="width:${Math.round(pk.pos/totL*100)}%"></i></div></div>`;
+            const totUn = pk.lineIdxs.reduce((t, i) => t + (o.lines[i].qty || 1), 0);
+            const feitosUn = pk.lineIdxs.reduce((t, i) => t + (o.lines[i].packedUnits || 0), 0);
+            const unAtual = (ln.packedUnits || 0) + 1;
+            h += `<div class="card"><div style="display:flex;justify-content:space-between;align-items:center"><b>📦 Tote ${pk.tote} · ${o.label}</b><span>${feitosUn}/${totUn} un</span></div>
+        <div class="barra-prog"><i style="width:${totUn?Math.round(feitosUn/totUn*100):0}%"></i></div></div>`;
             h += `<div class="card" style="text-align:center;padding:24px">
         <div style="display:flex;justify-content:center;margin-bottom:8px">${imgProd(ln.sku,130)}</div>
         <div style="font-size:13px;color:var(--texto-fraco)">Próximo produto</div>
         <div style="font-size:22px;font-weight:800;margin:8px 0">${p?p.name:ln.sku}</div>
-        <div style="color:var(--texto-fraco);font-size:13px">${ln.sku} · ${ln.qty} un</div>
+        <div style="color:var(--texto-fraco);font-size:13px">${ln.sku} · unidade ${unAtual} de ${ln.qty}</div>
+        ${(ln.qty>1)?`<div class="alerta-vermelho" style="margin-top:10px;font-size:13px">⚠️ Embale 1 unidade por vez — cada uma é de um cliente diferente</div>`:''}
         <button class="btn amarelo grande" style="margin-top:14px" onclick="packingBiparProduto()">📷 Bipar o produto</button></div>`;
         } else if (pk.fase === 'flyer') {
             const p = getProd(pk.alvoSku);
@@ -6097,7 +6242,7 @@ function renderEstoque() {
 
 /* ========= INIT ========= */
 (function boot() {
-    initFirebase();
+    initBackend();
     atualizarHeaderCad();
     atualizarBtnColetor();
     if (!L.cad) {
@@ -6107,7 +6252,9 @@ function renderEstoque() {
     } else {
         bootCad();
     }
-    // watchdog de inatividade (o Firebase cuida da sincronização em tempo real)
+    // polling do Apps Script + watchdog de inatividade
+    setInterval(function() { try { cloudPoll(); } catch (e) {} }, 4000);
+    setInterval(function() { try { cloudFlush(); } catch (e) {} }, 5000);
     setInterval(function() { try { watchdogInatividade(); } catch (e) {} }, 30000);
 })();
 
