@@ -6103,7 +6103,6 @@ function renderPacking() {
         <div style="font-size:13px;color:var(--texto-fraco)">Próximo produto</div>
         <div style="font-size:22px;font-weight:800;margin:8px 0">${p?p.name:ln.sku}</div>
         <div style="color:var(--texto-fraco);font-size:13px">${ln.sku} · unidade ${unAtual} de ${ln.qty}</div>
-        ${(ln.qty>1)?`<div class="alerta-vermelho" style="margin-top:10px;font-size:13px">⚠️ Embale 1 unidade por vez — cada uma é de um cliente diferente</div>`:''}
         <button class="btn amarelo grande" style="margin-top:14px" onclick="packingBiparProduto()">📷 Bipar o produto</button></div>`;
         } else if (pk.fase === 'flyer') {
             const p = getProd(pk.alvoSku);
