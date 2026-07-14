@@ -120,6 +120,24 @@
   .modal .manual input{margin-bottom:8px;}
   .alvo-msg{color:var(--amarelo);text-align:center;font-size:13px;padding:6px 16px;}
 
+  /* indicador "aguardando leitura" (só aparece no modo coletor) */
+  #scan-wait{display:none;flex-direction:column;align-items:center;justify-content:center;
+    gap:8px;padding:40px 20px calc(28px + env(safe-area-inset-bottom));text-align:center;color:#fff;}
+  #scan-wait .scan-wait-ic{font-size:60px;line-height:1;animation:scanpulse 1.4s ease-in-out infinite;}
+  #scan-wait .scan-wait-tx{font-size:18px;font-weight:800;color:var(--amarelo);}
+  #scan-wait .scan-wait-sub{font-size:13px;color:#cfcfcf;}
+  @keyframes scanpulse{0%,100%{opacity:1;transform:scale(1);}50%{opacity:.45;transform:scale(.92);}}
+
+  /* MODO COLETOR: some com câmera e com o campo de digitar; mostra o "aguardando" */
+  #modal-scan.coletor #reader{display:none;}
+  #modal-scan.coletor #scan-wait{display:flex;}
+  #modal-scan.coletor .manual{padding:0;}
+  #modal-scan.coletor #manual-label,
+  #modal-scan.coletor #manual-btn{display:none;}
+  /* input fica invisível mas focável, pra capturar a bipada sem abrir teclado */
+  #modal-scan.coletor #manual-code{position:absolute;opacity:0;height:1px;width:1px;
+    padding:0;margin:0;border:0;pointer-events:none;}
+
   #toast{position:fixed;left:50%;transform:translateX(-50%);bottom:88px;z-index:200;
     padding:12px 18px;border-radius:24px;color:#fff;font-weight:800;font-size:14px;
     box-shadow:0 4px 16px rgba(0,0,0,.25);opacity:0;transition:opacity .2s, transform .2s;pointer-events:none;max-width:90%;text-align:center;}
@@ -471,10 +489,15 @@
   </div>
   <div class="alvo-msg" id="scan-msg">Aponte a câmera para o QR / código de barras</div>
   <div id="reader"></div>
+  <div id="scan-wait">
+    <div class="scan-wait-ic">🔫</div>
+    <div class="scan-wait-tx">Aguardando leitura do coletor…</div>
+    <div class="scan-wait-sub">Bipe o código — ele entra automaticamente.</div>
+  </div>
   <div class="manual">
-    <label class="campo" style="color:#ccc">Bipe com o coletor (Zebra) ou digite o código:</label>
-    <input id="manual-code" placeholder="Ex.: A-01 ou SKU-001" autocomplete="off" autocapitalize="characters" onkeydown="if(event.key==='Enter'){event.preventDefault();confirmarManual();}">
-    <button class="btn amarelo" onclick="confirmarManual()">Confirmar código</button>
+    <label class="campo" id="manual-label" style="color:#ccc">Bipe com o coletor (Zebra) ou digite o código:</label>
+    <input id="manual-code" placeholder="Ex.: A-01 ou SKU-001" autocomplete="off" autocapitalize="characters" oninput="onManualInput()" onkeydown="if(event.key==='Enter'){event.preventDefault();confirmarManual();}">
+    <button class="btn amarelo" id="manual-btn" onclick="confirmarManual()">Confirmar código</button>
   </div>
 </div>
 
@@ -3794,7 +3817,29 @@ function toast(msg, tipo = 'info') {
 let scanner = null,
     scanCb = null,
     scanLock = false,
-    scanAbertoEm = 0;
+    scanAbertoEm = 0,
+    scanIdleT = null;
+
+/* No modo coletor a bipada entra sozinha: o coletor "digita" o código muito rápido
+   e para. Se vier ENTER (sufixo), confirma na hora (onkeydown). Se NÃO vier ENTER,
+   confirmamos assim que os caracteres param de chegar (~150ms) — sem apertar botão. */
+function onManualInput() {
+    if (!L.modoColetor) return; // no modo câmera/digitar, só confirma no Enter/botão
+    clearTimeout(scanIdleT);
+    scanIdleT = setTimeout(function () {
+        var el = document.getElementById('manual-code');
+        if (el && el.value.trim() && !scanLock) confirmarManual();
+    }, 150);
+}
+
+/* mantém o campo (invisível) sempre focado no modo coletor, pra não perder a bipada */
+document.addEventListener('focusout', function (ev) {
+    var modal = document.getElementById('modal-scan');
+    if (!modal || !modal.classList.contains('on') || !modal.classList.contains('coletor')) return;
+    if (ev.target && ev.target.id === 'manual-code') {
+        setTimeout(function () { try { document.getElementById('manual-code').focus(); } catch (e) {} }, 60);
+    }
+});
 
 function abrirScanner(titulo, msg, cb) {
     scanCb = cb;
@@ -3802,13 +3847,23 @@ function abrirScanner(titulo, msg, cb) {
     scanAbertoEm = Date.now();
     document.getElementById('scan-titulo').textContent = titulo;
     document.getElementById('scan-msg').textContent = msg || 'Aponte a câmera para o QR / código de barras';
-    document.getElementById('manual-code').value = '';
-    document.getElementById('modal-scan').classList.add('on');
+    var mc = document.getElementById('manual-code');
+    mc.value = '';
+    var modal = document.getElementById('modal-scan');
+    modal.classList.add('on');
     if (L.modoColetor) {
-        document.getElementById('scan-msg').textContent = (msg || '') + ' — bipe com o coletor Zebra ou digite e pressione Enter';
-        setTimeout(function () { try { document.getElementById('manual-code').focus(); } catch (e) {} }, 120);
+        // modo coletor: sem câmera, sem campo visível e sem teclado — a bipada entra sozinha
+        modal.classList.add('coletor');
+        mc.setAttribute('inputmode', 'none'); // não abre o teclado virtual
+        mc.readOnly = false;
+        document.getElementById('scan-msg').textContent = msg || 'Bipe o código com o coletor';
+        clearTimeout(scanIdleT);
+        setTimeout(function () { try { mc.focus(); } catch (e) {} }, 120);
         return; // no modo coletor não abrimos a câmera
     }
+    // modo câmera/digitar: campo visível, teclado liberado
+    modal.classList.remove('coletor');
+    mc.setAttribute('inputmode', 'text');
     const formatos = (typeof Html5QrcodeSupportedFormats !== 'undefined') ? [
         Html5QrcodeSupportedFormats.QR_CODE, Html5QrcodeSupportedFormats.CODE_128,
         Html5QrcodeSupportedFormats.CODE_39, Html5QrcodeSupportedFormats.EAN_13,
@@ -3868,7 +3923,11 @@ function pararCamera() {
 
 function fecharScanner() {
     pararCamera();
-    document.getElementById('modal-scan').classList.remove('on');
+    clearTimeout(scanIdleT);
+    var modal = document.getElementById('modal-scan');
+    modal.classList.remove('on');
+    modal.classList.remove('coletor');
+    try { document.getElementById('manual-code').blur(); } catch (e) {}
     scanCb = null;
 }
 
@@ -3879,9 +3938,10 @@ function onScan(txt) {
 }
 
 function confirmarManual() {
+    clearTimeout(scanIdleT);
     const v = document.getElementById('manual-code').value;
     if (!v.trim()) {
-        toast("Digite um código", "err");
+        if (!L.modoColetor) toast("Digite um código", "err");
         return;
     }
     if (scanLock) return;
