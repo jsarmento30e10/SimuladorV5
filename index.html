@@ -3818,24 +3818,54 @@ let scanner = null,
     scanCb = null,
     scanLock = false,
     scanAbertoEm = 0,
-    scanIdleT = null;
+    scanIdleT = null,
+    scanBuf = "";
 
-/* No modo coletor a bipada entra sozinha: o coletor "digita" o código muito rápido
-   e para. Se vier ENTER (sufixo), confirma na hora (onkeydown). Se NÃO vier ENTER,
-   confirmamos assim que os caracteres param de chegar (~150ms) — sem apertar botão. */
-function onManualInput() {
-    if (!L.modoColetor) return; // no modo câmera/digitar, só confirma no Enter/botão
-    clearTimeout(scanIdleT);
-    scanIdleT = setTimeout(function () {
-        var el = document.getElementById('manual-code');
-        if (el && el.value.trim() && !scanLock) confirmarManual();
-    }, 150);
+function scanModalColetorAberto() {
+    var m = document.getElementById('modal-scan');
+    return !!(m && m.classList.contains('on') && m.classList.contains('coletor'));
 }
 
-/* mantém o campo (invisível) sempre focado no modo coletor, pra não perder a bipada */
+/* No modo coletor a bipada entra sozinha. O coletor manda o código como se fosse
+   um teclado (bem rápido) e depois para. Confirmamos quando:
+   - vier ENTER (sufixo do coletor)  → na hora;
+   - OU os caracteres pararem de chegar (~150ms) → sem apertar nada. */
+function flushScanColetor() {
+    clearTimeout(scanIdleT);
+    if (!scanModalColetorAberto() || scanLock) { scanBuf = ""; return; }
+    var el = document.getElementById('manual-code');
+    var v = (scanBuf || (el ? el.value : "") || "").trim();
+    scanBuf = "";
+    if (el) el.value = "";
+    if (!v) return;
+    scanLock = true;
+    onScan(v);
+}
+
+function agendarFlushColetor() {
+    clearTimeout(scanIdleT);
+    scanIdleT = setTimeout(flushScanColetor, 150);
+}
+
+/* reforço para coletores que injetam via IME (evento input, sem keydown) */
+function onManualInput() {
+    if (!L.modoColetor) return; // no modo câmera/digitar só confirma no Enter/botão
+    var el = document.getElementById('manual-code');
+    if (el && el.value) scanBuf = el.value; // usa o que o IME escreveu
+    agendarFlushColetor();
+}
+
+/* captura global das teclas do coletor — NÃO depende do campo estar focado */
+document.addEventListener('keydown', function (ev) {
+    if (!scanModalColetorAberto()) return;
+    if (ev.key === 'Enter') { ev.preventDefault(); flushScanColetor(); return; }
+    if (ev.ctrlKey || ev.altKey || ev.metaKey) return;
+    if (ev.key && ev.key.length === 1) { scanBuf += ev.key; agendarFlushColetor(); }
+}, true);
+
+/* mantém o campo (invisível) focado no modo coletor, como reforço */
 document.addEventListener('focusout', function (ev) {
-    var modal = document.getElementById('modal-scan');
-    if (!modal || !modal.classList.contains('on') || !modal.classList.contains('coletor')) return;
+    if (!scanModalColetorAberto()) return;
     if (ev.target && ev.target.id === 'manual-code') {
         setTimeout(function () { try { document.getElementById('manual-code').focus(); } catch (e) {} }, 60);
     }
@@ -3858,7 +3888,11 @@ function abrirScanner(titulo, msg, cb) {
         mc.readOnly = false;
         document.getElementById('scan-msg').textContent = msg || 'Bipe o código com o coletor';
         clearTimeout(scanIdleT);
-        setTimeout(function () { try { mc.focus(); } catch (e) {} }, 120);
+        scanBuf = "";
+        // foca o campo (reforço p/ coletores que precisam de foco); repete algumas vezes
+        [80, 200, 450].forEach(function (t) {
+            setTimeout(function () { try { mc.focus(); } catch (e) {} }, t);
+        });
         return; // no modo coletor não abrimos a câmera
     }
     // modo câmera/digitar: campo visível, teclado liberado
@@ -3924,6 +3958,7 @@ function pararCamera() {
 function fecharScanner() {
     pararCamera();
     clearTimeout(scanIdleT);
+    scanBuf = "";
     var modal = document.getElementById('modal-scan');
     modal.classList.remove('on');
     modal.classList.remove('coletor');
